@@ -184,9 +184,9 @@ class TrackSet:
                 continue
             k,v = x.split('=')
             if k == 'c':
-                cyls = [False]*100
+                cyls = [False]*1000
                 for crange in v.split(','):
-                    m = re.match('(\d\d?)(-(\d\d?)(/(\d))?)?$', crange)
+                    m = re.match('(\d\d?\d?)(-(\d\d?\d?)(/(\d))?)?$', crange)
                     if m is None: raise ValueError()
                     if m.group(3) is None:
                         s,e,step = int(m.group(1)), int(m.group(1)), 1
@@ -215,8 +215,8 @@ class TrackSet:
                     if heads[h]: self.heads.append(h)
             elif re.match('h[01].off$', k):
                 h = int(re.match('h([01]).off$', k).group(1))
-                m = re.match('([+-][\d])$', v)
-                if m is None: raise ValueError()
+                m = re.match('([+-]\d\d?)$', v)
+                if m is None: raise ValueError('no valid number in '+k)
                 self.h_off[h] = int(m.group(1))
             elif k == 'step':
                 m = re.match('1/(\d)$', v)

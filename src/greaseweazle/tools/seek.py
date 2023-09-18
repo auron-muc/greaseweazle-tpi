@@ -41,7 +41,7 @@ def main(argv) -> None:
     args = parser.parse_args(argv[2:])
 
     try:
-        struct.pack('b', args.cylinder)
+        struct.pack('h', args.cylinder)
     except struct.error:
         raise error.Fatal("Cylinder %d out of range" % args.cylinder)
     if not 0 <= args.cylinder <= 83 and not args.force:

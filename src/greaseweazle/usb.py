@@ -250,7 +250,7 @@ class Unit:
     ## seek:
     ## Seek the selected drive's heads to the specified track (cyl, head).
     def seek(self, cyl, head) -> None:
-        self._send_cmd(struct.pack("2Bb", Cmd.Seek, 3, cyl))
+        self._send_cmd(struct.pack("2Bh", Cmd.Seek, 4, cyl))
         trk0 = not self.get_pin(26)
         if cyl == 0 and not trk0:
             # This can happen with Kryoflux flippy-modded Panasonic drives
