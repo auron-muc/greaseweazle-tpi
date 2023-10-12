@@ -51,6 +51,11 @@ class Codec:
         ...
 
     @abstractmethod
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        ...
+
+    @abstractmethod
     def master_track(self) -> MasterTrack:
         ...
 
@@ -154,19 +159,19 @@ from greaseweazle.codec.amiga import amigados
 from greaseweazle.codec.macintosh import mac_gcr
 from greaseweazle.codec.commodore import c64_gcr
 
-def mk_trackdef(format_name: str) -> TrackDef:
+def mk_trackdef(format_name: str, disk: DiskDef) -> TrackDef:
     if format_name in ['amiga.amigados']:
-        return amigados.AmigaDOSDef(format_name)
+        return amigados.AmigaDOSDef(format_name, disk)
     if format_name in ['ibm.mfm', 'ibm.fm', 'dec.rx02']:
-        return ibm.IBMTrack_FixedDef(format_name)
+        return ibm.IBMTrack_FixedDef(format_name, disk)
     if format_name in ['ibm.scan']:
-        return ibm.IBMTrack_ScanDef(format_name)
+        return ibm.IBMTrack_ScanDef(format_name, disk)
     if format_name in ['mac.gcr']:
-        return mac_gcr.MacGCRDef(format_name)
+        return mac_gcr.MacGCRDef(format_name, disk)
     if format_name in ['c64.gcr']:
-        return c64_gcr.C64GCRDef(format_name)
+        return c64_gcr.C64GCRDef(format_name, disk)
     if format_name in ['bitcell']:
-        return bitcell.BitcellTrackDef(format_name)
+        return bitcell.BitcellTrackDef(format_name, disk)
     raise error.Fatal('unrecognised format name: %s' % format_name)
 
 
@@ -222,7 +227,7 @@ def get_diskdef(
                     error.check(disk.heads is not None, 'missing heads')
                     assert disk.cyls is not None # mypy
                     assert disk.heads is not None # mypy
-                    track = mk_trackdef(tracks_match.group(2))
+                    track = mk_trackdef(tracks_match.group(2), disk)
                     for x in tracks_match.group(1).split(','):
                         if x == '*':
                             for c in range(disk.cyls):

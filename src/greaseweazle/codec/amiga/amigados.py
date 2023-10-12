@@ -79,6 +79,26 @@ class AmigaDOS(codec.Codec):
             self.sector[sec] = bytes(16), tdat[sec*512:(sec+1)*512]
         return totsize
 
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        raw = PLLTrack(time_per_rev = self.time_per_rev,
+                       clock = self.clock, data = track, pll = pll)
+        bits, _ = raw.get_all_data()
+
+        for offs in bits.itersearch(sync):
+
+            if self.nr_missing() == 0:
+                break
+
+            sec = bits[offs:offs+544*16].tobytes()
+            if len(sec) != 1088:
+                continue
+
+            header = decode(sec[4:12])
+            format, track, sec_id, togo = tuple(header)
+            return track
+        return None
+
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
         raw = PLLTrack(time_per_rev = self.time_per_rev,
                        clock = self.clock, data = track, pll = pll)
@@ -169,8 +189,9 @@ class AmigaDOSDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.secs = None
+        self.disk: codec.DiskDef = disk
         self.finalised = False
 
     def add_param(self, key: str, val) -> None:

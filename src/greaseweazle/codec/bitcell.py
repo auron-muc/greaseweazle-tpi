@@ -57,6 +57,10 @@ class BitcellTrack(codec.Codec):
     def set_img_track(self, tdat: bytes) -> int:
         return 0
 
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        return None
+
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
         flux = track.flux()
         flux.cue_at_index()
@@ -83,9 +87,10 @@ class BitcellTrackDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.clock: Optional[float] = None
         self.time_per_rev: Optional[float] = None
+        self.disk: codec.DiskDef = disk
         self.finalised = False
 
     def add_param(self, key: str, val) -> None:

@@ -66,7 +66,7 @@ class C64GCR(codec.Codec):
 
     # private
     def tracknr(self) -> int:
-        return self.head*35 + self.cyl + 1
+        return self.head*self.config.disk.cyls + self.cyl + 1
 
     def has_sec(self, sec_id: int) -> bool:
         return self.sector[sec_id] is not None
@@ -88,10 +88,38 @@ class C64GCR(codec.Codec):
             self.sector[sec] = tdat[sec*256:(sec+1)*256]
         return totsize
 
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        raw = PLLTrack(time_per_rev = self.time_per_rev,
+                       clock = self.clock, data = track, pll = pll,
+                       lowpass_thresh = 1.4e-6)
+        bits, _ = raw.get_all_data()
+
+        for offs in bits.itersearch(sector_sync):
+
+            if self.nr_missing() == 0:
+                break
+
+            # Decode header, 8 bytes (=10 bytes GCR):
+            # 0x08, csum, sector, track, disk_id[2], gap[2]
+            offs += 10
+            sec = bits[offs:offs+10*8].tobytes()
+            if len(sec) != 10:
+                continue
+            hdr = optimised.decode_c64_gcr(sec)
+            sum = 0
+            for x in hdr[1:6]:
+                sum ^= x
+            if sum != 0:
+                continue
+            sec_id, cyl, disk_id = struct.unpack('>2BH', hdr[2:6])
+            return cyl
+        return None
+
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
         raw = PLLTrack(time_per_rev = self.time_per_rev,
                        clock = self.clock, data = track, pll = pll,
-                       lowpass_thresh = 2.5e-6)
+                       lowpass_thresh = 1.4e-6)
         bits, _ = raw.get_all_data()
 
         for offs in bits.itersearch(sector_sync):
@@ -196,9 +224,10 @@ class C64GCRDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.secs: Optional[int] = None
         self.clock: Optional[float] = None
+        self.disk: codec.DiskDef = disk
         self.finalised = False
 
     def add_param(self, key: str, val) -> None:

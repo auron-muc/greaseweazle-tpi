@@ -19,5 +19,6 @@
 /src/*.egg-info
 /build/
 /dist/
+/temp/
 /src/greaseweazle/__init__.py
 

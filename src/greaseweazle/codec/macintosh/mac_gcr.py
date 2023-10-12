@@ -96,6 +96,32 @@ class MacGCR(codec.Codec):
             self.sector[sec] = bytes(12) + tdat[sec*512:(sec+1)*512]
         return totsize
 
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        raw = PLLTrack(time_per_rev = self.time_per_rev,
+                       clock = self.clock, data = track, pll = pll)
+        bits, _ = raw.get_all_data()
+
+        for offs in bits.itersearch(sector_sync):
+
+            if self.nr_missing() == 0:
+                break
+
+            # Decode header
+            offs += 3*8
+            sec = bits[offs:offs+5*8].tobytes()
+            if len(sec) != 5:
+                continue
+            hdr = optimised.decode_mac_gcr(sec)
+            sum = 0
+            for x in hdr:
+                sum ^= x
+            if sum != 0:
+                continue
+            cyl, sec_id, side, fmt = tuple(hdr[:4])
+            return cyl
+        return None
+ 
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
         raw = PLLTrack(time_per_rev = self.time_per_rev,
                        clock = self.clock, data = track, pll = pll)
@@ -194,11 +220,12 @@ class MacGCRDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.secs: Optional[int] = None
         self.clock: Optional[float] = None
         self.format: Optional[int] = None
         self.interleave = 1
+        self.disk: codec.DiskDef = disk
         self.finalised = False
 
     def add_param(self, key: str, val) -> None:

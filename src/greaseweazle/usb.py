@@ -119,6 +119,7 @@ class GetInfo:
 ## Cmd.{Get,Set}Params indexes
 class Params:
     Delays          = 0
+    Cylinders       = 1
 
 
 ## Cmd.SetBusType values
@@ -217,7 +218,14 @@ class Unit:
         (self._select_delay, self._step_delay,
          self._seek_settle_delay, self._motor_delay,
          self._watchdog_delay) = struct.unpack("<5H", self.ser.read(10))
-
+        try:
+            # Initialise the min and max cylinders properties with current firmware values.
+            self._send_cmd(struct.pack("4B", Cmd.GetParams, 4, Params.Cylinders, 4))
+            (self._min_cylinders, self._max_cylinders) = struct.unpack("<2h", self.ser.read(4))
+        except CmdError:
+            # GetParams.Cylinders is unsupported by older firmwares.
+            # fail silently.
+            pass
 
     ## reset:
     ## Resets communications with Greaseweazle.
@@ -252,24 +260,29 @@ class Unit:
     def seek(self, cyl, head) -> None:
         self._send_cmd(struct.pack("2Bh", Cmd.Seek, 4, cyl))
         trk0 = not self.get_pin(26)
-        if cyl == 0 and not trk0:
-            # This can happen with Kryoflux flippy-modded Panasonic drives
-            # which may not assert the /TRK0 signal when stepping *inward*
-            # from cylinder -1. We can check this by attempting a fake outward
-            # step, which is exactly NoClickStep's purpose.
-            try:
-                info = self.get_current_drive_info()
-                if info.is_flippy:
-                    self._send_cmd(struct.pack("2B", Cmd.NoClickStep, 2))
-            except CmdError:
-                # GetInfo.CurrentDrive is unsupported by older firmwares.
-                # NoClickStep is "best effort". We're on a likely error
-                # path anyway, so let them fail silently.
-                pass
-            trk0 = not self.get_pin(26) # now re-sample /TRK0
-        error.check(cyl < 0 or (cyl == 0) == trk0,
-                    "Track0 signal %s after seek to cylinder %d"
+        # if cyl == 0 and not trk0:
+        #     # This can happen with Kryoflux flippy-modded Panasonic drives
+        #     # which may not assert the /TRK0 signal when stepping *inward*
+        #     # from cylinder -1. We can check this by attempting a fake outward
+        #     # step, which is exactly NoClickStep's purpose.
+        #     try:
+        #         info = self.get_current_drive_info()
+        #         if info.is_flippy:
+        #             self._send_cmd(struct.pack("2B", Cmd.NoClickStep, 2))
+        #     except CmdError:
+        #         # GetInfo.CurrentDrive is unsupported by older firmwares.
+        #         # NoClickStep is "best effort". We're on a likely error
+        #         # path anyway, so let them fail silently.
+        #         pass
+        #     trk0 = not self.get_pin(26) # now re-sample /TRK0
+        if cyl < 0 or (cyl == 0) != trk0:
+            print ("Warn: Track0 signal %s after seek to cylinder %d"
                     % (('absent', 'asserted')[trk0], cyl))
+        self.select_head(head)    
+
+    ## select head:
+    ## select the head without changing position.
+    def select_head(self, head) -> None:
         self._send_cmd(struct.pack("3B", Cmd.Head, 3, head))
 
 
@@ -595,6 +608,34 @@ class Unit:
     def watchdog_delay(self, watchdog_delay):
         self._watchdog_delay = watchdog_delay
         self._set_delays()
+
+
+    ##
+    ## Cylinders-property public getters and setters:
+    ##  min_cylinder:      Delay (usec) after asserting drive select
+    ##  max_cylinder:      Delay (usec) after issuing a head-step command
+    ##
+
+    def _set_cylinders(self):
+        self._send_cmd(struct.pack("<3B2h", Cmd.SetParams,
+                                   3+2*2, Params.Cylinders,
+                                   self._min_cylinders, self._max_cylinders))
+
+    @property
+    def min_cylinders(self):
+        return self._min_cylinders
+    @min_cylinders.setter
+    def min_cylinders(self, min_cylinders):
+        self._min_cylinders = min_cylinders
+        self._set_cylinders()
+
+    @property
+    def max_cylinders(self):
+        return self._max_cylinders
+    @max_cylinders.setter
+    def max_cylinders(self, max_cylinders):
+        self._max_cylinders = max_cylinders
+        self._set_cylinders()
 
 # Local variables:
 # python-indent: 4

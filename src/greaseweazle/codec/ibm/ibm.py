@@ -594,6 +594,30 @@ class IBMTrack(codec.Codec):
 
         return areas
 
+    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        flux = track.flux()
+        flux.cue_at_index()
+        raw = PLLTrack(time_per_rev = self.time_per_rev,
+                       clock = self.clock, data = flux, pll = pll)
+        if self.mode is Mode.FM:
+            areas = self.fm_decode_raw(raw)
+        elif self.mode is Mode.MFM:
+            areas = self.mfm_decode_raw(raw)
+        elif self.mode is Mode.DEC_RX02:
+            mmfm_raw = PLLTrack(time_per_rev = self.time_per_rev,
+                                clock = self.clock/2, data = flux, pll = pll)
+            areas = self.fm_decode_raw(raw, mmfm_raw)
+
+        # Add to the deduped lists
+        a: Optional[TrackArea]
+        for a in areas:
+            list: List[Any]
+            if isinstance(a, Sector):
+                return a.idam.c
+        return None
+
+
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
         flux = track.flux()
         flux.cue_at_index()
@@ -800,7 +824,7 @@ class IBMTrack_FixedDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.secs = 0
         self.sz: List[int] = []
         self.id = 1
@@ -817,6 +841,7 @@ class IBMTrack_FixedDef(codec.TrackDef):
         self.iam = True
         self.rate = 0
         self.img_bps: Optional[int] = None
+        self.disk: codec.DiskDef = disk
         self.finalised = False
 
     def add_param(self, key: str, val: str) -> None:
@@ -980,9 +1005,10 @@ class IBMTrack_ScanDef(codec.TrackDef):
 
     default_revs = default_revs
 
-    def __init__(self, format_name: str):
+    def __init__(self, format_name: str, disk: codec.DiskDef):
         self.rpm: Optional[int] = None
         self.rate: Optional[int] = None
+        self.disk: codec.DiskDef = disk
 
     def add_param(self, key: str, val: str) -> None:
         if key in ['rate', 'rpm']:
