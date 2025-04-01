@@ -20,6 +20,8 @@ from greaseweazle.codec import codec
 from greaseweazle.track import MasterTrack, PLL, PLLTrack
 from greaseweazle.flux import Flux, HasFlux
 
+import sys
+
 default_revs = 2
 
 def sync(dat, clk=0xc7):
@@ -594,7 +596,7 @@ class IBMTrack(codec.Codec):
 
         return areas
 
-    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
         """Decodes the flux and returns the first cylinder from the header files that was found"""
         flux = track.flux()
         flux.cue_at_index()
@@ -936,7 +938,7 @@ class IBMTrack_Scan(codec.Codec):
 
     @property
     def nsec(self) -> int:
-        return self.track.nsec
+        return self.track.nsec 
 
     def summary_string(self) -> str:
         return self.track.summary_string()
@@ -956,6 +958,29 @@ class IBMTrack_Scan(codec.Codec):
     def get_img_track(self) -> bytearray:
         return self.track.get_img_track()
 
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+        """Decodes the flux and returns the first cylinder from the header files that was found"""
+        flux = track.flux()
+        flux.cue_at_index()
+
+        rates = self.RATES if self.rate is None else [self.rate]
+        rpms = self.RPMS if self.rpm is None else [self.rpm]
+
+        for rpm in rpms:
+            time_per_rev = 60 / rpm
+            for rate in rates:
+                clock = 5e-4 / rate
+                raw = PLLTrack(time_per_rev = time_per_rev, clock = clock, data = flux, pll = pll)
+                for mode in [Mode.MFM, Mode.FM]:
+                    sys.stderr.write("Checking cyl="+str(self.cyl)+", head="+str(self.head)+", rpm="+str(rpm)+", rate="+str(rate)+", mode="+str(mode))
+                    t = IBMTrack(self.cyl, self.head, mode)
+                    t.clock, t.time_per_rev = clock, time_per_rev
+                    guessed = t.guess_physical_cylinder(track,pll)
+                    if guessed is not None:
+                        return guessed
+                    else:
+                        sys.stderr.write("No data for cyl="+str(self.cyl)+", head="+str(self.head)+", rpm="+str(rpm)+", rate="+str(rate)+", mode="+str(mode))
+        
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:
 
         # Add more data to an existing track instance?

@@ -57,7 +57,7 @@ class BitcellTrack(codec.Codec):
     def set_img_track(self, tdat: bytes) -> int:
         return 0
 
-    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
         """Decodes the flux and returns the first cylinder from the header files that was found"""
         return None
 

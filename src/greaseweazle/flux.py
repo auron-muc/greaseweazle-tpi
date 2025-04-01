@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 from typing import List, Optional, Protocol
-
+import statistics
+import numpy as np
 from greaseweazle import error
 
 class HasFlux(Protocol):
@@ -26,12 +27,14 @@ class Flux:
                  index_list: List[float],
                  flux_list: List[float],
                  sample_freq: float,
-                 index_cued = True) -> None:
+                 index_cued = True,
+                 index_cut = False) -> None:
         self.index_list = index_list
         self.list = flux_list
         self.sample_freq = sample_freq
         self.splice: Optional[float] = None
         self.index_cued = index_cued
+        self.index_cut = index_cut
 
 
     def __str__(self) -> str:
@@ -51,6 +54,13 @@ class Flux:
 
 
     def append(self, flux: Flux) -> None:
+        '''
+        Append one flux to another. Trailing flux after the last index and before the first index will be combined together.
+        Note that there is no synchronization whatsoever. If combining flux from reads that are not 100% in sync, you need to
+        remove the flux after the last index on the object appended to (#cut_at_index()) and the flux before the first index
+        on the object being appended (#cue_at_index()). There is a high probability this will still cause an error at the stich,
+        but for more than one revolution per combined object, it is made up by the added information. 
+        '''
         # Scale the new flux if required, to match existing sample frequency.
         # This will result in floating-point flux values.
         if self.sample_freq == flux.sample_freq:
@@ -67,23 +77,79 @@ class Flux:
 
 
     def cue_at_index(self) -> None:
+        '''
+        Clips the flux before the first index signal as well as the first index signal.
+        Will make sure the flux is still aligned with the exact index timing. (at the cost of altering the first flux change timing) 
+        '''
 
         if self.index_cued:
             return
 
         # Clip the initial partial revolution.
         to_index = self.index_list[0]
-        for i in range(len(self.list)):
+        pos_in_list =0 # we need a variable outside of the loop scoping
+        for i in range(len(self.list)-1):
+            pos_in_list=i # remember the last index visited in case we drop out of the loop
             to_index -= self.list[i]
             if to_index < 0:
                 break
         if to_index < 0:
-            self.list = [-to_index] + self.list[i+1:]
+            self.list = [-to_index] + self.list[pos_in_list+1:]
         else: # we ran out of flux
             self.list = []
         self.index_list = self.index_list[1:]
         self.index_cued = True
 
+    def cut_at_index(self) -> None:
+        '''
+        Cut the flux after the last index signal. 
+        It will keep the index and trim the last flux change to match the index signal. 
+        '''
+
+        if self.index_cut:
+            return
+
+        # Clip the partial revolution after the last index.
+        from_index = sum(self.index_list)
+        avg_index = statistics.fmean(self.index_list)
+        to_remove = sum(self.list) - from_index
+
+        if to_remove <= 0:
+            # this means the last index signal is after the last flux change - we'll accept that and bail out. (nothing to delete...)
+            self.index_cut = True
+            return
+
+        if ( to_remove > avg_index):
+            # remove more than the average index length of data????
+            raise RuntimeError("cut at last index would remove more than one full revolution of data")
+
+        deleted_time=0
+        items_to_remove = 0
+        while deleted_time < to_remove:
+            items_to_remove += 1
+            deleted_time += self.list[-items_to_remove]
+
+        # trim the last item, so we have the flux change exactly with the last index.
+        # it is not perfect, especially for non-index-hole disks like C64, but will do for stiching flux together
+        # accepting it will likely break the sector at the stiching point
+        append_item = [] if (deleted_time-to_remove) ==0 else [(deleted_time-to_remove)]
+        self.list = self.list[:-items_to_remove] + append_item
+        self.index_cut = True
+
+    def reverse(self) -> Flux:
+        sumTicks = sum(self.list)
+        reversedIndex: List[float] = []
+
+        # first index is the rest after all other revolutions
+        reversedIndex.append(sumTicks - sum(self.index_list))
+
+        for idx in reversed(self.index_list):
+            reversedIndex.append(idx)
+        
+        # need to remove the last one again
+        del reversedIndex[-1]
+
+        return Flux(reversedIndex, list(reversed(self.list)), self.sample_freq, self.index_cued)
 
     def flux_for_writeout(self, cue_at_index) -> WriteoutFlux:
 

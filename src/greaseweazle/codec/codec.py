@@ -19,7 +19,16 @@ from greaseweazle.track import MasterTrack, PLL
 from greaseweazle.flux import Flux, HasFlux, WriteoutFlux
 
 
+class TrackMetadata:
+    def __init__(self):
+        # Dict of sector headers detected. Key is (track,sector,valid), value depends on the codec
+        # this may contain invalid sectors as well
+        self.sector_headers: Dict[Tuple[int,int,Optional[bool]], any] = {}
+
+
 class Codec:
+    def __init__(self):
+        self.metadata = TrackMetadata()
 
     @property
     @abstractmethod
@@ -51,7 +60,7 @@ class Codec:
         ...
 
     @abstractmethod
-    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
         """Decodes the flux and returns the first cylinder from the header files that was found"""
         ...
 
@@ -90,6 +99,7 @@ class DiskDef:
         self.heads: Optional[int] = None
         self.step = 1
         self.track_map: Dict[Tuple[int,int],TrackDef] = dict()
+        self.flippy = False
 
     def add_param(self, key: str, val: str) -> None:
         if key == 'cyls':
@@ -104,6 +114,9 @@ class DiskDef:
             n = int(val)
             error.check(1 <= n <= 4, '%s out of range' % key)
             self.step = n
+        elif key == 'flippy':
+            v = bool(val)
+            self.flippy = v
         else:
             raise error.Fatal('unrecognised disk option: %s' % key)
 

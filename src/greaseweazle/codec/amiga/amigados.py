@@ -79,7 +79,7 @@ class AmigaDOS(codec.Codec):
             self.sector[sec] = bytes(16), tdat[sec*512:(sec+1)*512]
         return totsize
 
-    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
         """Decodes the flux and returns the first cylinder from the header files that was found"""
         raw = PLLTrack(time_per_rev = self.time_per_rev,
                        clock = self.clock, data = track, pll = pll)

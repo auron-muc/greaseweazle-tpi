@@ -9,6 +9,11 @@
 
 description = "Read a disk to the specified image file."
 
+#### ugly hack to allow debugging
+#import sys; 
+#sys.path.insert(0,'C:\\Users\\Tobias\\git\\greaseweazle\\src')
+
+
 import time
 from typing import cast, Dict, Tuple, List, Type, Optional
 
@@ -27,8 +32,23 @@ from greaseweazle import usb as USB
 from greaseweazle.flux import Flux, HasFlux
 from greaseweazle.codec import codec
 from greaseweazle.image import image
+from greaseweazle.scope import scope as sc
 
 from greaseweazle import track
+
+import scipy as sci
+import scipy.signal as sig
+from scipy.interpolate import CubicSpline
+import matplotlib.pyplot as plt
+from threading import Thread
+
+
+def rollavg_convolve_edges(a,n):
+    'scipy.convolve, edge handling'
+    assert n%2==1
+    return sig.convolve(a,np.ones(n,dtype='float'), 'same')/sig.convolve(np.ones(len(a)),np.ones(n), 'same')  
+
+
 plls = track.plls
 
 class DummyEncoder(JSONEncoder):
@@ -58,13 +78,13 @@ class RedirectStdStreams(object):
 
 class Offset(object):
     """Offset information for a head"""
-    def __init__(self, offset : int = None, track : int = None):
+    def __init__(self, offset : int = None, cyl_offset : int = None):
         self._offset = offset
-        self._track  = track
+        self._cyl_offset  = cyl_offset
     def offset(self) -> int:
         return self._offset
-    def track(self) -> int:
-        return self._track
+    def cyl_offset(self) -> int:
+        return self._cyl_offset
 
 def open_image(args, image_class: Type[image.Image]) -> image.Image:
     image = image_class.to_file(
@@ -95,22 +115,38 @@ def read_and_normalise(usb: USB.Unit, args, revs: int, ticks=0) -> Flux:
     return flux
 
 
-def read_with_retry(usb: USB.Unit, args, t, arduino = None, offset : Offset = None) -> Tuple[Flux, Optional[HasFlux]]:
+def read_with_retry(usb: USB.Unit, args, t: util.TrackSet.TrackIter, arduino = None, offset : Offset = None, scope :sc.Scope = None) -> Tuple[Flux, Optional[HasFlux]]:
 
     cyl, head = t.cyl, t.head
+    disk : codec.DiskDef = args.fmt_cls if args.fmt_cls is not None else None
 
-    print ("setting offset ", str(offset.offset()))
-    arduino.write(str(offset.offset()).encode())
+    detected_offset = 0
+    detected_cylinder_offset = 0
+
+    if offset is not None:
+        detected_offset = offset.offset()
+        detected_cylinder_offset = offset.cyl_offset()
+
+    print ("additional cylinder offset ", str(detected_cylinder_offset))
+
+    print ("setting micro offset ", str(detected_offset))
+    arduino.write(str(detected_offset).encode())
     arduino.write("\n".encode())
-    usb.seek(t.physical_cyl, t.physical_head)
+
+    usb.seek(t.physical_cyl+detected_cylinder_offset, t.physical_head)
     time.sleep(0.2)
 
     flux = read_and_normalise(usb, args, args.revs, args.ticks)
+    if disk is not None and disk.flippy and head == 1:
+        flux = flux.reverse()
+    flux.cue_at_index()                              
+
     if args.fmt_cls is None:
         print("T%u.%u: %s" % (cyl, head, flux.summary_string()))
         return flux, flux
 
-    dat = args.fmt_cls.decode_flux(cyl, head, flux)
+
+    dat = disk.decode_flux(cyl, head, flux)
     if dat is None:
         print("T%u.%u: WARNING: Out of range for for format '%s': No format "
               "conversion applied" % (cyl, head, args.format))
@@ -121,24 +157,127 @@ def read_with_retry(usb: USB.Unit, args, t, arduino = None, offset : Offset = No
         dat.decode_flux(flux, pll)
 
     print( "T%u.%u: %s from %s" % (cyl, head, dat.summary_string(), flux.summary_string()))
+    dat.guess_physical_cylinder(flux, pll)
 
+    flux_by_offset = [flux]
+    offsets = [0]
     seek_retry, retry = 0, 0
-    if dat.nr_missing() > 0 and arduino is not None and offset is not None :
-        for o in [ 1, -1, 2, -2, 3, -3]:
-            print("offset", str(offset.offset()+o) )
-            arduino.write((str(offset.offset()+o) +"\n").encode() )
-            time.sleep(0.01)
-            _flux = read_and_normalise(usb, args, max(args.revs, 3))
+    if dat.nr_missing() > 0 and arduino is not None :
+        last_missing=dat.nr_missing()
+        best_score = heatmap_score(flux)
+        min_search_distance = 3
+
+        o=-1  # start with offset -1 - empiric studies say we tend to be too far
+        while len(flux_by_offset) < 20 and last_missing > 0: 
+            #print("offset", str(detected_offset+o) )
+            arduino.write((str(detected_offset+o) +"\n").encode() )
+            time.sleep(0.1)
+            flux = read_and_normalise(usb, args, max(args.revs, 3))
+            if disk is not None and disk.flippy and head == 1:
+                flux = flux.reverse()
+            flux.cue_at_index()
+            score = heatmap_score(flux)
+
             for pll in plls:
                 if dat.nr_missing() != 0:
-                    dat.decode_flux(_flux, pll)
-            flux.append(_flux)
+                    dat.decode_flux(flux, pll)
+            flux_by_offset.append(flux)
+            offsets.append(o)
             s = "T%u.%u: %s from %s" % (cyl, head, dat.summary_string(),
                                         flux.summary_string())
             s += " (Retry offset from track-center %u)" % (o)
             print(s)
+            if dat.nr_missing() < last_missing or score < best_score or abs(o) < min_search_distance:
+                # going in the right direction
+                o += 1 if (o>0) else -1
+            else:
+                # try the other direction    
+                if o < 0:
+                    o = 1
+                    last_missing=999   # ridiculously high number
+                    best_score=999
+                elif o < 0:
+                    o = 0 # try center once again
+                else:
+                    break # no sense in trying again
+            
+            last_missing = dat.nr_missing()
+            if best_score > score:
+                best_score = score
+
             if dat.nr_missing() == 0:
+                # save this offset as the new best guess
+                print ("Saving "+str(detected_offset+o)+" as new offset for head "+str(head))
+                offset._offset = detected_offset+o
                 break
+
+    # find the best flux we have read, return that
+    best_flux = 0
+    if dat.nr_missing() != 0:
+        best_score = 1000
+        for  i in range(len(flux_by_offset)):
+            _flux = flux_by_offset[i]
+            score = heatmap_score(_flux)
+            print ("raw score for offset",offsets[i],score)
+            # also decode the flux again, we need to know how many are missing per offset
+            _dat = disk.decode_flux(cyl, head, _flux)
+            # factor in the number of missing sectors
+            score = score + (_dat.nr_missing()*10) 
+            print ("weighted score for offset",offsets[i],score)
+            if score < best_score:
+                best_flux=i
+                best_score=score
+
+    # re-select/start drive
+    usb.drive_select(args.drive.unit_id)
+    usb.drive_motor(args.drive.unit_id, state=True)
+
+    # combine all the read fluxes into one big, we'll return that later
+    flux = flux_by_offset[0]
+    for additional_flux in flux_by_offset[1:]:
+        flux.append(additional_flux)
+
+    if scope is not None and dat.nr_missing() !=0:
+
+        # position the track on the best position the greaseweazle could find
+        print("reading scope at offset "+str(detected_offset+offsets[best_flux]))
+        arduino.write((str(detected_offset+offsets[best_flux]) +"\n").encode() )
+        time.sleep(0.1)
+        # create a greaseweazle read thread in the background to keep the drive spinning
+        thread = Thread(target = read_and_normalise, args = (usb, args, 20))
+        thread.start()
+        time.sleep(0.5)
+        # query the data from the drive
+        data = scope.query(base_filename=args.file+("_T%u.%u"%(cyl, head)))
+        # wait for greaseweazle read to finish (it really should already have completed)
+        thread.join()
+
+        # get max and min for first channel
+        c0max = np.max(data[0])
+        c0min = np.min(data[0])
+
+        for prominence in [ (c0max-c0min)*0.75 , (c0max-c0min)*0.5, (c0max-c0min)*0.25, (c0max-c0min)*0.1, (c0max-c0min)*0.01]:
+            # compute the flux from the raw scope data
+            print("searching for data with a prominence of ",prominence)
+            scopeflux = scope.getFlux(data, prominence=prominence)
+            if scopeflux is not None:
+                scopeflux.cue_at_index()
+                scopeflux.cut_at_index()
+                if disk.flippy and head == 1:
+                    scopeflux = scopeflux.reverse()
+                #scopedat = disk.decode_flux(cyl, head, flux)
+                for pll in plls:
+                    if dat.nr_missing() != 0:
+                        dat.decode_flux(scopeflux, pll)
+                print("T%u.%u: %s from %s (Retry from scope)" % (cyl, head, dat.summary_string(),
+                                                scopeflux.summary_string()))
+                flux.append(scopeflux)
+            else:
+                print("scope detected only noise")
+
+        # re-select/start drive
+        usb.drive_select(args.drive.unit_id)
+        usb.drive_motor(args.drive.unit_id, state=True)
 
     return flux, dat
 
@@ -181,13 +320,11 @@ def print_summary(args, summary: Dict[Tuple[int,int],codec.Codec]) -> None:
               (good_sec, tot_sec, good_sec*100/tot_sec))
 
 
-def heatmap_score(flux: Flux) -> int:
+def heatmap_score(flux: Flux) -> float:
     """Calculates a score for how nicely aligned the bands are. 
        Lower scores greater zero are better. 
        "1" would mean flux changes at perfectly the same timing and only one band. 
     """
-
-
     ticks_per_usec = flux.sample_freq / 1000000
     ticks_per_msec = flux.sample_freq / 1000    
     heatmap = {}
@@ -215,19 +352,30 @@ def heatmap_score(flux: Flux) -> int:
  #   if score < 10:
  #       print("Debug: ", json.dumps(heatmap, cls=DummyEncoder))
 
-    return score 
+    return round(score,2) 
 
 def tuning_scan (usb: USB.Unit, args, image: image.Image, arduino : Serial ) -> List[Offset]:
     """ Do the initial tuning scan. 
         Loop over three full tracks and detect the noise spikes inbetween. then center to the middle.
         Also try to detect which track we're on by decoding the header.
-        Returns a Tuple with [offset, detected_track]"""
+        Returns a Tuple with [offset, cylinder_offset]"""
+
+    tpi=args.tpi
+    exact_offsets_per_track = (25.4/tpi)/0.02
+    offsets_per_track = math.ceil(exact_offsets_per_track) 
+    nr_full_tracks=3
+    num_scores = nr_full_tracks*offsets_per_track
+    tracks : util.TrackSet = args.tracks
 
     # the scores by offset from nominal track-center [offset => score]
-    raw_scores: List[Dict[int, float]] = [{},{}]
-    avg_scores: List[Dict[int, float]] = [{},{}]
+    raw_scores: List[List[float]] = [[],[]]
+    avg_scores: List[List[float]] = [[],[]]
+    interpolated: List[List[float]] = [[],[]]
+    interpolation_factor = 10
+
     threshold: List[float] = [0, 0]
-    heads = [0,1]
+    
+    heads = tracks.heads #  [0,1]
     cyl  = 0
 
     # seek to track 0 and calibrate
@@ -236,111 +384,178 @@ def tuning_scan (usb: USB.Unit, args, image: image.Image, arduino : Serial ) -> 
     time.sleep(0.2)
     print("Seeking 0")
     usb.seek(cyl=0,head=0)
+    time.sleep(2) # wait until reaching cylinder 0
     print("calibrating1")
+    arduino.reset_input_buffer() # clear all previous input
     arduino.write("c\n".encode())
-    arduino.flush();
+    arduino.flush()
     ctr = 0
-    while usb.get_pin(26) and ctr < 1000:
-        print (arduino.read_all().decode(), end="")
+    sresult = arduino.read_all().decode()
+    # usb.get_pin(26)
+    while "Calibrated track0" not in sresult and ctr < 1000:
+        sresult += arduino.read_all().decode()
+        print (sresult, end="")
         ctr += 1
         time.sleep(0.01)
-    print("calibrating2")
+    time.sleep(0.25)
+    usb.seek(cyl=8,head=0)
+    usb.seek(cyl=0,head=0)
+
+    arduino.reset_input_buffer() # clear all previous input
+    print("\ncalibrating again")
     arduino.write("c\n".encode())
-    arduino.flush();
-    time.sleep(0.5)
-    tpi=args.tpi
-    print("setting TPI to ",tpi)
+    arduino.flush()
+
+    ctr = 0
+    sresult = arduino.read_all().decode()
+    # usb.get_pin(26)
+    while "Calibrated track0" not in sresult and ctr < 1000:
+        sresult += arduino.read_all().decode()
+        print (sresult, end="")
+        ctr += 1
+        time.sleep(0.01)
+    time.sleep(0.25)
+
+    print("\nsetting TPI to ",tpi)
     arduino.write("t".encode())
     arduino.write(str(tpi).encode())
     arduino.write("\n".encode())
 
     usb.seek(cyl=cyl,head=heads[0])
-
-    exact_offsets_per_track = (25.4/tpi)/0.02
-
-    offsets_per_track = math.ceil(exact_offsets_per_track) 
-    for offset in range (0, 2*offsets_per_track):
-        arduino.write(str(offset).encode())
-        arduino.write("\n".encode())
+    time.sleep(0.5)
+    
+    offset =0
+    spikes = [None]*2
+    diff = [None]*2
+    result = [Offset(),Offset()]
+    while ((offset < 100 ) and (result[0].offset() is None or result[1].offset() is None)):
+        buf = (str(offset)+"\n").encode()
+        for c in buf:
+            arduino.write([c])
+            arduino.flush()
+        #arduino.write(str(offset).encode())
+        #arduino.write("\n".encode())
         time.sleep(0.05)
         for head in heads:
-            usb.select_head(head)
-            flux = usb.read_track(1)
-            raw_scores[head][offset] = heatmap_score(flux)
-            print(offset,"raw score head",head,":", raw_scores[head][offset])
+            if result[head].offset() is None:
+                usb.select_head(head)
+                flux = usb.read_track(1)
+                raw_scores[head] += [ heatmap_score(flux) ] # score will make the gaps inbetween tracks visible as peaks
 
-    # calculate the moving average
-    for offset in range (1, (2*offsets_per_track)-1):
-        for head in heads:
-            avg_scores[head][offset] = (raw_scores[head][offset-1]+raw_scores[head][offset]+raw_scores[head][offset+1])/3
-            print(offset,"avg score head",head,":", avg_scores[head][offset])
 
-    result = [Offset(),Offset()]
+
+                if len(raw_scores[head]) > 17:
+
+                    # first: smooth out randomness in measurement a bit
+                    avg_scores[head] = rollavg_convolve_edges( raw_scores[head], 3)
+
+                    # interpolate by factor 10
+                    ip = avg_scores[head]
+                    x = np.linspace(1, len(ip), len(ip))
+                    xx = np.linspace(1, len(ip), ((len(ip)-1)*interpolation_factor)+1)
+                    interpolated[head] = CubicSpline(x, ip)(xx)   
+                    avg = np.average(interpolated[head])
+                    # find the peaks in the interpolated data. min distance is 10(offsets)*10(interpolation factor). 
+                    # 12.7 is the distance in 0.02mm offsets at 100tpi , 10 would match 127 TPI
+                    # (so this means we're not finding anything with more tpi)
+                    _spikesxxl = sig.find_peaks(interpolated[head], height=avg*0.5, distance=10*interpolation_factor)[0] 
+
+                    spikes[head] = _spikesxxl
+
+                    # found two peaks and we gathered 4 more offsets after the second peak
+                    # reading after the second peak should prevent false positives because we did not do the rolling average on the edge
+                    if len(spikes[head]) >= 2 and (spikes[head][1]/interpolation_factor) + 5 < len(raw_scores[head])  :
+
+                        trackcenter = round((_spikesxxl[1]-(_spikesxxl[1]-_spikesxxl[0])/2.0)/interpolation_factor )
+                        tpi_detected=round(25.4/(0.02*(_spikesxxl[1]-_spikesxxl[0])/(2*interpolation_factor)))
+                        print ("Head: ", head)
+                        print ("trackcenter: ", trackcenter)
+                        print ("detected track width (tpi):" +str(tpi_detected))
+
+                        result[head] = Offset(int(round(trackcenter,0)), 0)
+        offset += 1    
+
+    # save the graphics for the head calibration
     for head in heads:
-        scores_list = np.fromiter(avg_scores[head].values(), dtype=float)
-        avg = np.average(scores_list)
-        stddev = np.std(scores_list)
-        threshold = avg+(stddev/2)
-        print ("threshold",threshold)
+        #print ("raw_scores["+str(head)+"] = " +str(raw_scores[head]))
+        fig, ax = plt.subplots()
+        fig.set_dpi(600)
+        fig.set_size_inches(40,8)
+        plt.axhline(y=0,color='lightgrey',linewidth=1)
+        plt.axhline(y=5,color='lightgrey',linewidth=1)
+        plt.axhline(y=10,color='lightgrey',linewidth=1)
+        plot_time = np.arange(0.0, len(raw_scores[head]), 1)
+        line, = ax.plot(plot_time, raw_scores[head], lw=1, color='blue')
+        line, = ax.plot(plot_time, avg_scores[head], lw=1, color='red')
+        plot_time = np.arange(0.0, len(interpolated[head])/interpolation_factor, 1.0/interpolation_factor)
+        line4, = ax.plot(plot_time, interpolated[head], lw=1, color='green')
 
-        spikes = []
-        in_valley_at_start = (avg_scores[head][1] < threshold)
-        for offset,score in avg_scores[head].items():
-            # skip over any values above threshold at the beginning, partially recorded spikes would throw us off
-            if in_valley_at_start:
-                if score < threshold:
-                    continue
-                else:
-                    in_valley_at_start = False
-            # detect spike falling edge
-            if len(spikes)%2 == 0 and score < threshold:
-                spikes.append(offset-1)
-            # detect spike rising edge
-            if len(spikes)%2 == 1 and score >= threshold:
-                spikes.append(offset)
+        for s in spikes[head]:
+            plt.axvline(x=s/interpolation_factor,color='r',linewidth=3)
+        plt.savefig('offset_scores_head'+str(head)+'.png')
+        #plt.show()
+    #dummy = input("press enter to continue")
 
-        if len(spikes) < 2:
-            print ("Warning: No full track detected in scan on head", head)
-            continue
+    for head in heads:
+        if result[head].offset() is not None:
+            trackcenter = result[head].offset()
+            arduino.write(str(trackcenter).encode())
+            arduino.write("\n".encode())
+            time.sleep(0.2)
 
-        trackcenter = (spikes[0]+spikes[1])/2
-        print ("trackcenter: ", trackcenter)
-        result[head] = Offset(int(round(trackcenter,0)), None)
-        arduino.write(str(int(round(trackcenter,0))).encode())
-        arduino.write("\n".encode())
-        time.sleep(0.2)
-
-        # read the track at best position, 3 revolutions
-        usb.select_head(head)
-        flux = read_and_normalise(usb, args, 2, args.ticks)
-    
-    
-        cyl_detected = None
-        if args.fmt_cls is not None:
-            s=""
-            devnull = open(os.devnull, 'w')
-            with RedirectStdStreams(stdout=devnull, stderr=devnull):
-            #if True:
-                dat = args.fmt_cls.mk_track(cyl, head)
-                if dat is not None:
-                    for pll in [None] + plls[1:]:
-                        cyl_detected = dat.guess_cylinder(flux, pll)
-                        if cyl_detected is not None:
-                            break
-        if cyl_detected is not None:
-            while ( trackcenter > (exact_offsets_per_track/4) and cyl_detected > 0) or \
-                  ( trackcenter > (exact_offsets_per_track/2) and cyl_detected is None):
-                s += "shifting Track %u at offset %f by %f\n" % (cyl_detected, trackcenter, exact_offsets_per_track)
-                trackcenter -= exact_offsets_per_track
+            # read the track at best position, 3 revolutions
+            usb.select_head(head)
+            flux = read_and_normalise(usb, args, 2, args.ticks)
+        
+            cyl_detected = None
+            disk : Optional[codec.DiskDef] = args.fmt_cls
+            cylinders_per_track=1
+            if disk is not None:
+                if (tpi != 48 ): 
+                    cylinders_per_track=disk.step
+                if disk.flippy and head == 1:
+                    flux = flux.reverse()
+                tmp_out_str=""
+                devnull = open(os.devnull, 'w')
+                #with RedirectStdStreams(stdout=devnull, stderr=devnull):
+                if True:
+                    dat = disk.mk_track(cyl, head)
+                    if dat is not None:
+                        for pll in [None] + plls[1:]:
+                            cyl_detected = dat.guess_physical_cylinder(flux, pll)
+                            if cyl_detected is not None:
+                                cyl_detected += tracks.h_off[head]
+                                tmp_out_str += "Found guessed cylinder "+str(cyl_detected)+" on head "+str(head)+" and offset "+str(trackcenter) +"\n"
+                                disk_cyls = 0 if disk.cyls is None else disk.cyls
+                                if head==1 and cyl_detected >= disk_cyls:
+                                    cyl_detected -= disk_cyls
+                                break
                 if cyl_detected is not None:
-                    cyl_detected -= 1
-            s += "detected Track %u at offset %u\n" % (cyl_detected, int(round(trackcenter,0)))
-            result[head] = Offset(int(round(trackcenter,0)), cyl_detected)
-            print(s)
+                    while ( trackcenter > ((exact_offsets_per_track*cylinders_per_track)/4) and cyl_detected > cyl) :
+                        tmp_out_str += "shifting guessed cyl %u at offset %f by %f\n" % (cyl_detected, trackcenter, exact_offsets_per_track*cylinders_per_track)
+                        trackcenter -= exact_offsets_per_track*cylinders_per_track
+                        cyl_detected -= 1
+
+                    tmp_out_str += "detected guessed cyl %u at offset %u\n" % (cyl_detected, int(round(trackcenter,0)))
+                    result[head] = Offset(int(round(trackcenter,0)), cyl-cyl_detected)
+                else:
+                    while ( trackcenter > (exact_offsets_per_track/2)):
+                        tmp_out_str += "shifting Track at offset %f by %f\n" % (trackcenter, exact_offsets_per_track)
+                        trackcenter -= exact_offsets_per_track
+                    result[head] = Offset(int(round(trackcenter,0)), 0) # we found no cylinder, so just assume no shift is necessary.
+                    dummy = input("No cylinder detected in track information. press enter to continue")
+                    # re-select/start the greaseweazle
+                    usb.drive_select(args.drive.unit_id) 
+                    usb.drive_motor(args.drive.unit_id, state=True)
+
+                print(tmp_out_str)
+                time.sleep(2)
+
+    #dummy = input("press enter to continue")
 
     return result
 
-def read_to_image(usb: USB.Unit, args, image: image.Image, arduino : Serial) -> None:
+def read_to_image(usb: USB.Unit, args, image: image.Image, arduino : Serial, scope : sc.Scope = None) -> None:
     """Reads a floppy disk and dumps it into a new image file.
     """
 
@@ -367,10 +582,11 @@ def read_to_image(usb: USB.Unit, args, image: image.Image, arduino : Serial) -> 
 
     autotune_offset = tuning_scan(usb,args,image, arduino)
  
-    for t in args.tracks:
+    tracks : util.TrackSet = args.tracks
+    for t in tracks:
         cyl, head = t.cyl, t.head
 
-        flux, dat = read_with_retry(usb, args, t, arduino=arduino, offset=autotune_offset[t.head])
+        flux, dat = read_with_retry(usb, args, t, arduino=arduino, offset=autotune_offset[t.head], scope=scope)
 
         if args.fmt_cls is not None and dat is not None:
             assert isinstance(dat, codec.Codec)
@@ -422,6 +638,7 @@ def main(argv) -> None:
                         help="manual PLL parameter override")
     parser.add_argument("--dd", type=util.level,
                         help="drive interface DD/HD select (H,L)")
+    parser.add_argument("--scope-ip", help="ip address of the siglent scope attached to floppy drive")
     parser.add_argument("file", help="output filename")
     parser.description = description
     parser.prog += ' ' + argv[1]
@@ -434,6 +651,16 @@ def main(argv) -> None:
 
     try:
         usb = util.usb_open(args.device)
+
+        # hack - my drive mechanics are slow
+        if args.tpi == 48:
+            usb.step_delay = 16000
+        else:
+            usb.step_delay = 8000
+
+        usb.seek_settle_delay = 250
+        #usb.motor_delay = 2000
+
         image_class = util.get_image_class(args.file)
         if not args.format:
             args.format = image_class.default_format
@@ -460,6 +687,11 @@ Known formats:\n%s"""
         # wait for arduino to become ready
         time.sleep(1)
 
+        scope = None
+        if args.scope_ip is not None:
+            scope = sc.Scope( ip = args.scope_ip)
+            scope.setup()
+
         print(("Reading %s revs=" % args.tracks) + str(args.revs))
         if args.format:
             print("Format " + args.format)
@@ -469,7 +701,7 @@ Known formats:\n%s"""
                 usb.set_pin(2, args.dd)
             with open_image(args, image_class) as image:
                 util.with_drive_selected(
-                    lambda: read_to_image(usb, args, image, arduino=arduino), usb, args.drive)
+                    lambda: read_to_image(usb, args, image, arduino=arduino, scope=scope ), usb, args.drive)
         finally:
             if args.dd is not None:
                 usb.set_pin(2, prev_pin2)

@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 import struct
 from bitarray import bitarray
+from collections import Counter
 
 from greaseweazle import error
 from greaseweazle import optimised
@@ -66,7 +67,11 @@ class C64GCR(codec.Codec):
 
     # private
     def tracknr(self) -> int:
-        return self.head*self.config.disk.cyls + self.cyl + 1
+        disk : codec.DiskDef = self.config.disk
+        if disk.flippy:
+            return self.cyl + 1
+        else: 
+            return self.head*disk.cyls + self.cyl + 1
 
     def has_sec(self, sec_id: int) -> bool:
         return self.sector[sec_id] is not None
@@ -88,12 +93,14 @@ class C64GCR(codec.Codec):
             self.sector[sec] = tdat[sec*256:(sec+1)*256]
         return totsize
 
-    def guess_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
+    def guess_physical_cylinder(self, track: HasFlux, pll: Optional[PLL]=None) -> int:
         """Decodes the flux and returns the first cylinder from the header files that was found"""
         raw = PLLTrack(time_per_rev = self.time_per_rev,
                        clock = self.clock, data = track, pll = pll,
                        lowpass_thresh = 1.4e-6)
         bits, _ = raw.get_all_data()
+
+        results=[] 
 
         for offs in bits.itersearch(sector_sync):
 
@@ -113,7 +120,11 @@ class C64GCR(codec.Codec):
             if sum != 0:
                 continue
             sec_id, cyl, disk_id = struct.unpack('>2BH', hdr[2:6])
-            return cyl
+            results.append(cyl-1)  # CBM_GCR track 1 is physical cylinder 0 
+
+        if len(results) > 0:
+            print ("detected cylinder signatures:", results)
+            return Counter(results).most_common(1)[0][0]
         return None
 
     def decode_flux(self, track: HasFlux, pll: Optional[PLL]=None) -> None:

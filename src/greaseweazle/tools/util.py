@@ -147,17 +147,22 @@ class TrackSet:
 
     class TrackIter:
         """Iterate over a TrackSet in physical <cyl,head> order."""
-        def __init__(self, ts):
+        physical_cyl : int
+        physical_head : int
+        cyl: int
+        head: int
+        ts : TrackSet
+        def __init__(self, ts : TrackSet):
             l = []
             for c in ts.cyls:
                 for h in ts.heads:
                     pc, ph = ts.ch_to_pch(c, h)
-                    l.append((pc, ph, c, h))
+                    l.append((pc, ph, c, h, ts))
             l.sort()
             self.l = iter(l)
         def __next__(self):
             (self.physical_cyl, self.physical_head,
-             self.cyl, self.head) = next(self.l)
+             self.cyl, self.head, self.ts) = next(self.l)
             return self
     
     def __init__(self, trackspec):
@@ -222,7 +227,7 @@ class TrackSet:
                 m = re.match('1/(\d)$', v)
                 self.step = -int(m.group(1)) if m is not None else int(v)
             else:
-                raise ValueError()
+                raise ValueError("Don't know how to handle key '"+k+"', with value '"+v+"'")
         
     def __str__(self):
         s = 'c=%s' % range_str(self.cyls)
